@@ -23,12 +23,14 @@ class Controller:
         self._get_info()
         assert self.model_number == 'KBD101\x00\x00'
         assert self.firmware_v == 131080
-        self.position_min_mm = 0
-        self.position_max_mm = 100
-        self.range_tol_mm = 0.1 # avoids range check assertion error
         self.EncCnt_per_mm = 2000
-        self.offset_mm = 0.05 # avoids encoder count overflow at zero position
+        # these stages seem to hang or produce encoder overflow at the max
+        # and min positions 'self.offset_mm' is an attempt to aviod these errors
+        self.offset_mm = 1
         self.offset_counts = int(round(self.offset_mm * self.EncCnt_per_mm))
+        self.position_min_mm = 0  # 0  corresponds to +1mm
+        self.position_max_mm = 98 # 98 corresponds to +99mm
+        self.position_tol_mm = 0.05 # tolerance window for relative moves
         self._set_enable(True)
         self._home()
         self.get_position_mm()
@@ -113,15 +115,19 @@ class Controller:
         response = self._send(cmd, response_bytes=12)
         self.ch_id_bytes = response[6:8]
         position_counts = int.from_bytes(response[8:12], byteorder='little')
-        position_mm = position_counts / self.EncCnt_per_mm
-        self.position_mm = position_mm - self.offset_mm # shift away from zero
+        self.position_counts = position_counts - self.offset_counts
+        self.position_mm = self.position_counts / self.EncCnt_per_mm
         if self.verbose:
             print('%s: -> position = %0.4fmm'%(self.name, self.position_mm))
         return self.position_mm
 
-    def _finish_move(self, polling_wait_s=0.01):
+    def _finish_move(self):
         if not self._moving: return
         self.port.read(20) # collect bytes to confirm move (could parse too...)
+        self.get_position_mm()
+        # check position is sane and counter overflow has been avioded
+        assert self.position_mm >= self.position_min_mm - self.position_tol_mm
+        assert self.position_mm <= self.position_max_mm + self.position_tol_mm
         self._moving = False
         if self.verbose:
             print('%s: -> finished moving'%(self.name))
@@ -129,23 +135,18 @@ class Controller:
 
     def move_mm(self, move_mm, relative=True, block=True):
         if self._moving: self._finish_move()
-        position_counts = int(round(move_mm * self.EncCnt_per_mm)) # integer
-        move_mm = position_counts / self.EncCnt_per_mm # legalize move
         if self.verbose:
-            print('%s: moving mm = %0.4fmm (relative=%s)'%(
+            print('%s: moving = %0.4fmm (relative=%s)'%(
                 self.name, move_mm, relative))
+        if relative: move_mm = self.position_mm + move_mm
+        assert move_mm >= self.position_min_mm - self.position_tol_mm
+        assert move_mm <= self.position_max_mm + self.position_tol_mm
+        position_counts = int(round(move_mm * self.EncCnt_per_mm)) # integer
+        position_counts = position_counts + self.offset_counts # add offset
+        # MGMSG_MOT_MOVE_ABSOLUTE
         d = bytes([b'\x50'[0] | b'\x80'[0]]) # 'destination byte'
-        if relative:        # MGMSG_MOT_MOVE_RELATIVE
-            self.position_mm = self.position_mm + move_mm
-            p = position_counts.to_bytes(4, byteorder='little', signed=True)
-            cmd = (b'\x48\x04\x06\x00' + d + b'\x01' + self.ch_id_bytes + p)
-        if not relative:    # MGMSG_MOT_MOVE_ABSOLUTE
-            self.position_mm = move_mm
-            position_counts = position_counts + self.offset_counts
-            p = position_counts.to_bytes(4, byteorder='little', signed=True)
-            cmd = (b'\x53\x04\x06\x00' + d + b'\x01' + self.ch_id_bytes + p)
-        assert self.position_mm >= self.position_min_mm - self.range_tol_mm
-        assert self.position_mm <= self.position_max_mm + self.range_tol_mm
+        p = position_counts.to_bytes(4, byteorder='little', signed=True)
+        cmd = (b'\x53\x04\x06\x00' + d + b'\x01' + self.ch_id_bytes + p)
         self._send(cmd)
         self._moving = True
         if block:
@@ -159,7 +160,7 @@ class Controller:
         return None
 
 if __name__ == '__main__':
-    stage = Controller('COM3', verbose=True, very_verbose=False)
+    stage = Controller('COM5', verbose=True, very_verbose=False)
 
 ##    stage.identify()
 
@@ -167,8 +168,9 @@ if __name__ == '__main__':
     stage.get_position_mm()
 
     print('\n# Test max range:')
-    stage.move_mm(100, relative=False)
-    stage.move_mm(0, relative=False)
+    for i in range(3):
+        stage.move_mm(98, relative=False)
+        stage.move_mm(0, relative=False)
 
     print('\n# Some relative moves:')
     for moves in range(3):
@@ -179,7 +181,7 @@ if __name__ == '__main__':
     print('\n# Some random absolute moves:')
     from random import uniform
     for moves in range(3):
-        random_move_mm = uniform(0, 100)
+        random_move_mm = uniform(0, 98)
         move = stage.move_mm(random_move_mm, relative=False)
 
     print('\n# Non-blocking move:')
