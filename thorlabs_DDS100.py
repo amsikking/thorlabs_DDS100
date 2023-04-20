@@ -1,4 +1,3 @@
-import time
 import serial
 
 class Controller:
@@ -32,7 +31,9 @@ class Controller:
         self.position_max_mm = 98 # 98 corresponds to +99mm
         self.position_tol_mm = 0.05 # tolerance window for relative moves
         self._set_enable(True)
-        self._home()
+        self._get_homed_status()
+        if not self._homed:
+            self._home()
         self.get_position_mm()
         self._moving = False
         self.move_mm(0, relative=False)
@@ -90,6 +91,16 @@ class Controller:
             print('%s: done setting enable'%self.name)
         return None
 
+    def _get_homed_status(self): # MGMSG_MOT_REQ_STATUSBITS
+        if self.verbose:
+            print('%s: getting homed status...'%self.name)
+        cmd = b'\x29\x04\x00\x00\x50\x01'
+        status_bits = self._send(cmd, response_bytes=12)[8:]
+        self._homed = bool(status_bits[1] & 4) # bit mask 0x00000400 = homed
+        if self.verbose:
+            print('%s: -> homed = %s'%(self.name, self._homed))
+        return self._homed
+
     def _home(self): # MGMSG_MOT_MOVE_HOME
         if self.verbose:
             print('%s: homing stage...'%self.name)
@@ -97,6 +108,7 @@ class Controller:
         # response_bytes=6 is not documented, discovered by trial and error
         # when the 6 bytes return it seems like the home routine is finished!
         self._send(cmd, response_bytes=6)
+        assert self._get_homed_status()
         if self.verbose:
             print('%s: -> done homing stage'%self.name)
         return None
